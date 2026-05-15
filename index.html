@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quoridor — 步步為營</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Raleway:wght@300;400;500;600&display=swap');
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{background:#08080E;}
+    button{outline:none;cursor:pointer;}
+    @keyframes pulse{0%,100%{opacity:.25}50%{opacity:1}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REPLACE this URL with your Railway deployment URL after deploying the server
+// ─────────────────────────────────────────────────────────────────────────────
+const SERVER_URL = 'https://PASTE-YOUR-RAILWAY-URL-HERE.up.railway.app';
+// ─────────────────────────────────────────────────────────────────────────────
+
+const {useState,useEffect,useRef,useCallback}=React;
+
+// ── BOARD CONSTANTS ───────────────────────────────────────────────────────────
+const CS=52,WS=10,UNIT=62,BSIZ=9*CS+8*WS;
+
+// ── GAME LOGIC ────────────────────────────────────────────────────────────────
+const K=(r,c)=>`${r},${c}`;
+const bD=(r,c,H)=>H.has(K(r,c))||(c>0&&H.has(K(r,c-1)));
+const bU=(r,c,H)=>r>0&&(H.has(K(r-1,c))||(c>0&&H.has(K(r-1,c-1))));
+const bR=(r,c,V)=>V.has(K(r,c))||(r>0&&V.has(K(r-1,c)));
+const bL=(r,c,V)=>c>0&&(V.has(K(r,c-1))||(r>0&&V.has(K(r-1,c-1))));
+
+function canGo(r,c,dr,dc,H,V){
+  const nr=r+dr,nc=c+dc;
+  if(nr<0||nr>8||nc<0||nc>8)return false;
+  if(dr===1)return !bD(r,c,H); if(dr===-1)return !bU(r,c,H);
+  if(dc===1)return !bR(r,c,V); if(dc===-1)return !bL(r,c,V);
+  return false;
+}
+const D4=[[-1,0],[1,0],[0,-1],[0,1]];
+
+function legalMoves(pos,opp,H,V){
+  const{r,c}=pos,seen=new Set(),res=[];
+  const push=(mr,mc)=>{const k=K(mr,mc);if(!seen.has(k)){seen.add(k);res.push({r:mr,c:mc});}};
+  for(const[dr,dc]of D4){
+    if(!canGo(r,c,dr,dc,H,V))continue;
+    const[nr,nc]=[r+dr,c+dc];
+    if(nr===opp.r&&nc===opp.c){
+      if(canGo(nr,nc,dr,dc,H,V))push(nr+dr,nc+dc);
+      else for(const[pr,pc]of(dr?[[0,-1],[0,1]]:[[-1,0],[1,0]]))
+        if(canGo(nr,nc,pr,pc,H,V))push(nr+pr,nc+pc);
+    }else push(nr,nc);
+  }
+  return res;
+}
+
+function bfsDist(sr,sc,goal,H,V){
+  const vis=new Set([K(sr,sc)]),q=[[sr,sc,0]];
+  while(q.length){
+    const[r,c,d]=q.shift();
+    if(r===goal)return d;
+    for(const[dr,dc]of D4){
+      if(!canGo(r,c,dr,dc,H,V))continue;
+      const k=K(r+dr,c+dc);
+      if(!vis.has(k)){vis.add(k);q.push([r+dr,c+dc,d+1]);}
+    }
+  }
+  return 999;
+}
+
+function bfsFirstStep(start,goal,opp,H,V){
+  const vis=new Set([K(start.r,start.c)]),q=[{pos:start,f:null}];
+  while(q.length){
+    const{pos,f}=q.shift();
+    if(pos.r===goal)return f;
+    for(const m of legalMoves(pos,opp,H,V)){
+      const k=K(m.r,m.c);
+      if(!vis.has(k)){vis.add(k);q.push({pos:m,f:f||m});}
+    }
+  }
+  return null;
+}
+
+function wallIsLegal(wr,wc,o,p1,p2,H,V){
+  if(wr<0||wr>7||wc<0||wc>7)return false;
+  const nH=new Set(H),nV=new Set(V);
+  if(o==='h'){
+    if(nH.has(K(wr,wc))||nV.has(K(wr,wc)))return false;
+    if(wc>0&&nH.has(K(wr,wc-1)))return false;
+    if(wc<7&&nH.has(K(wr,wc+1)))return false;
+    nH.add(K(wr,wc));
+  }else{
+    if(nV.has(K(wr,wc))||nH.has(K(wr,wc)))return false;
+    if(wr>0&&nV.has(K(wr-1,wc)))return false;
+    if(wr<7&&nV.has(K(wr+1,wc)))return false;
+    nV.add(K(wr,wc));
+  }
+  return bfsDist(p1.r,p1.c,0,nH,nV)<999&&bfsDist(p2.r,p2.c,8,nH,nV)<999;
+}
+
+function botDecide(bot,player,H,V,walls){
+  const ms=legalMoves(bot,player,H,V);
+  for(const m of ms)if(m.r===8)return{t:'move',pos:m};
+  const bd=bfsDist(bot.r,bot.c,8,H,V),pd=bfsDist(player.r,player.c,0,H,V);
+  let bw=null,bs=-Infinity;
+  if(walls>0)for(let wr=0;wr<=7;wr++)for(let wc=0;wc<=7;wc++)for(const o of['h','v']){
+    if(!wallIsLegal(wr,wc,o,player,bot,H,V))continue;
+    const nH=o==='h'?new Set([...H,K(wr,wc)]):H;
+    const nV=o==='v'?new Set([...V,K(wr,wc)]):V;
+    const np=bfsDist(player.r,player.c,0,nH,nV),nb=bfsDist(bot.r,bot.c,8,nH,nV);
+    const sc=(np-pd)-0.4*(nb-bd);
+    if(sc>bs&&np>pd){bs=sc;bw={wr,wc,o};}
+  }
+  if(bw&&bs>1.5&&pd<=bd+2)return{t:'wall',w:bw};
+  const s=bfsFirstStep(bot,8,player,H,V),pos=s||ms[0];
+  return pos?{t:'move',pos}:null;
+}
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+const initGame=()=>({p1:{r:8,c:4},p2:{r:0,c:4},H:new Set(),V:new Set(),OW:{},w1:10,w2:10,cur:1,win:null});
+
+function applyMove(g,pl,pos){
+  const w=(pl===1&&pos.r===0)||(pl===2&&pos.r===8);
+  return{...g,p1:pl===1?pos:g.p1,p2:pl===2?pos:g.p2,win:w?pl:null,cur:w?g.cur:(pl===1?2:1)};
+}
+function applyWall(g,pl,wr,wc,o){
+  return{...g,H:o==='h'?new Set([...g.H,K(wr,wc)]):g.H,V:o==='v'?new Set([...g.V,K(wr,wc)]):g.V,
+    OW:{...g.OW,[`${o}_${wr}_${wc}`]:pl},w1:pl===1?g.w1-1:g.w1,w2:pl===2?g.w2-1:g.w2,cur:pl===1?2:1};
+}
+
+// ── SHARED UI ─────────────────────────────────────────────────────────────────
+const BG='linear-gradient(135deg,#08080E 0%,#0C0D1A 50%,#08080E 100%)';
+
+function Mbtn({label,sub,onClick,accent}){
+  const[h,sH]=useState(false);const c=accent||'#C9A050';
+  return(
+    <button onClick={onClick} onMouseEnter={()=>sH(true)} onMouseLeave={()=>sH(false)}
+      style={{width:290,padding:'17px 36px',background:h?`rgba(201,160,80,0.1)`:'rgba(201,160,80,0.04)',
+        border:`1px solid ${h?c+'88':c+'30'}`,borderRadius:4,
+        display:'flex',flexDirection:'column',alignItems:'center',gap:5,transition:'all 0.2s'}}>
+      <span style={{fontFamily:"'Cinzel',serif",fontSize:17,color:c,letterSpacing:3}}>{label}</span>
+      <span style={{fontSize:11,color:'#4A3C28',letterSpacing:2}}>{sub.toUpperCase()}</span>
+    </button>
+  );
+}
+
+function Ibar({name,walls,active,color,goal,thinking,tag}){
+  return(
+    <div style={{display:'flex',alignItems:'center',gap:13,padding:'9px 18px',minWidth:316,
+      background:active?'rgba(201,160,80,0.05)':'transparent',
+      border:active?'1px solid rgba(201,160,80,0.17)':'1px solid transparent',
+      borderRadius:6,transition:'all 0.28s'}}>
+      <div style={{width:10,height:10,borderRadius:'50%',background:color,flexShrink:0,
+        boxShadow:active?`0 0 13px ${color}`:'none',transition:'box-shadow 0.28s'}}/>
+      <div>
+        <div style={{fontFamily:"'Cinzel',serif",fontSize:13,letterSpacing:2,
+          color:active?'#C9A050':'#3A2E1A',transition:'color 0.28s',display:'flex',alignItems:'center',gap:8}}>
+          {name}
+          {tag&&<span style={{fontFamily:"'Raleway',sans-serif",fontSize:9,color:'#5A4A38',letterSpacing:1,
+            border:'1px solid rgba(90,74,56,0.4)',borderRadius:2,padding:'1px 5px'}}>{tag}</span>}
+          {thinking&&<span style={{fontFamily:"'Raleway',sans-serif",fontSize:10,color:'#3E3020'}}>thinking…</span>}
+        </div>
+        <div style={{fontSize:10,color:'#2A2010',letterSpacing:1,marginTop:2}}>{goal} · {walls} walls</div>
+      </div>
+      {active&&!thinking&&<div style={{marginLeft:'auto',color:'#C9A050',fontSize:16}}>▶</div>}
+    </div>
+  );
+}
+
+function Cbtn({on,click,children}){
+  return(
+    <button onClick={click} style={{padding:'7px 13px',
+      background:on?'rgba(201,160,80,0.14)':'transparent',
+      border:`1px solid rgba(201,160,80,${on?0.52:0.22})`,
+      borderRadius:3,color:on?'#C9A050':'#4A3C28',
+      fontSize:10,letterSpacing:1.5,fontFamily:"'Raleway',sans-serif",transition:'all 0.18s'}}>
+      {children}
+    </button>
+  );
+}
+
+function Sbtn({onClick,c,children}){
+  return(
+    <button onClick={onClick} style={{padding:'11px 26px',background:'transparent',
+      border:`1px solid ${c}44`,borderRadius:3,color:c,
+      fontFamily:"'Cinzel',serif",fontSize:13,letterSpacing:2}}>
+      {children}
+    </button>
+  );
+}
+
+function Spinner(){
+  return<div style={{width:32,height:32,borderRadius:'50%',
+    border:'2px solid rgba(201,160,80,0.15)',borderTopColor:'#C9A050',
+    animation:'spin 0.85s linear infinite'}}/>;
+}
+
+// ── ONLINE LOBBY ──────────────────────────────────────────────────────────────
+function OnlineLobby({socket,onBack,onStart}){
+  const[view,setView]=useState('choice');
+  const[code,setCode]=useState('');
+  const[input,setInput]=useState('');
+  const[status,setStatus]=useState('');
+  const[copied,setCopied]=useState(false);
+
+  useEffect(()=>{
+    if(!socket)return;
+    const onCreated=({code})=>{setCode(code);setView('hosting');setStatus('Waiting for opponent…');};
+    const onStart=({playerNum})=>onStartRef.current(playerNum);
+    const onErr=({msg})=>{setStatus(msg);setView('choice');};
+    const onConnErr=()=>setStatus('Cannot reach server — check your internet connection.');
+    socket.on('room-created',onCreated);
+    socket.on('game-start',onStart);
+    socket.on('join-error',onErr);
+    socket.on('connect_error',onConnErr);
+    return()=>{socket.off('room-created',onCreated);socket.off('game-start',onStart);
+               socket.off('join-error',onErr);socket.off('connect_error',onConnErr);};
+  },[socket]);
+
+  // keep onStart in a ref so the socket listener always has the latest version
+  const onStartRef=useRef(onStart);
+  useEffect(()=>{onStartRef.current=onStart;},[onStart]);
+
+  const createRoom=()=>{
+    if(!socket?.connected){setStatus('Not connected to server. Try refreshing.');return;}
+    socket.emit('create-room');
+    setStatus('Creating…');
+  };
+  const joinRoom=()=>{
+    if(input.length<6){setStatus('Enter the full 6-character code');return;}
+    if(!socket?.connected){setStatus('Not connected to server. Try refreshing.');return;}
+    socket.emit('join-room',{code:input});
+    setStatus('Joining…');
+  };
+  const copy=()=>navigator.clipboard?.writeText(code).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000);});
+
+  if(view==='hosting')return(
+    <div style={{minHeight:'100vh',background:BG,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',fontFamily:"'Raleway',sans-serif",gap:28,animation:'fadein 0.3s ease'}}>
+      <div style={{textAlign:'center'}}>
+        <div style={{fontFamily:"'Cinzel',serif",fontSize:12,color:'#4A3C28',letterSpacing:5,marginBottom:24}}>ROOM CODE</div>
+        <div style={{fontFamily:"'Cinzel',serif",fontSize:60,color:'#C9A050',letterSpacing:14,
+          textShadow:'0 0 50px rgba(201,160,80,0.22)',marginBottom:20}}>{code}</div>
+        <button onClick={copy} style={{padding:'6px 18px',background:'transparent',
+          border:'1px solid rgba(201,160,80,0.25)',borderRadius:3,
+          color:copied?'#6AAA50':'#5A4A38',fontSize:11,letterSpacing:2,
+          fontFamily:"'Raleway',sans-serif",marginBottom:28,transition:'color 0.2s'}}>
+          {copied?'✓ COPIED':'COPY CODE'}
+        </button>
+        <div style={{color:'#3A2E1A',fontSize:11,letterSpacing:2,marginBottom:10}}>Share this with your opponent</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,justifyContent:'center'}}>
+          <div style={{width:6,height:6,borderRadius:'50%',background:'#C9A050',animation:'pulse 1.4s ease-in-out infinite'}}/>
+          <span style={{color:'#4A3C28',fontSize:11,letterSpacing:1}}>{status}</span>
+        </div>
+      </div>
+      <button onClick={onBack} style={{padding:'7px 18px',background:'transparent',
+        border:'1px solid rgba(62,48,32,0.35)',borderRadius:3,color:'#3A2E1A',
+        fontSize:10,letterSpacing:2,fontFamily:"'Raleway',sans-serif"}}>CANCEL</button>
+    </div>
+  );
+
+  return(
+    <div style={{minHeight:'100vh',background:BG,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',fontFamily:"'Raleway',sans-serif",gap:36,animation:'fadein 0.3s ease'}}>
+      <div style={{textAlign:'center'}}>
+        <div style={{fontFamily:"'Cinzel',serif",fontSize:38,color:'#C9A050',letterSpacing:7,marginBottom:8}}>ONLINE</div>
+        <div style={{color:'#3A2E1A',fontSize:11,letterSpacing:4}}>PLAY AGAINST A FRIEND</div>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:12,alignItems:'center'}}>
+        <Mbtn label="Create Room" sub="Host a new game" onClick={createRoom}/>
+        <div style={{padding:'20px 28px',background:'rgba(201,160,80,0.04)',
+          border:'1px solid rgba(201,160,80,0.18)',borderRadius:4,
+          display:'flex',flexDirection:'column',alignItems:'center',gap:10}}>
+          <div style={{fontFamily:"'Cinzel',serif",fontSize:12,color:'#C9A050',letterSpacing:3}}>JOIN ROOM</div>
+          <input type="text" value={input}
+            onChange={e=>setInput(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6))}
+            onKeyDown={e=>e.key==='Enter'&&joinRoom()}
+            placeholder="XXXXXX"
+            style={{fontFamily:"'Cinzel',serif",fontSize:24,letterSpacing:8,textAlign:'center',
+              background:'rgba(201,160,80,0.07)',border:'1px solid rgba(201,160,80,0.3)',
+              borderRadius:3,color:'#C9A050',padding:'12px 16px',width:220,
+              outline:'none',caretColor:'#C9A050'}}/>
+          <button onClick={joinRoom} style={{padding:'9px 28px',background:'rgba(201,160,80,0.12)',
+            border:'1px solid rgba(201,160,80,0.4)',borderRadius:3,color:'#C9A050',
+            fontFamily:"'Cinzel',serif",fontSize:12,letterSpacing:2}}>Join Game</button>
+          {status&&<div style={{fontSize:11,color:'#8A6A38',letterSpacing:1,textAlign:'center',maxWidth:240}}>{status}</div>}
+        </div>
+      </div>
+      <button onClick={onBack} style={{padding:'7px 18px',background:'transparent',
+        border:'1px solid rgba(62,48,32,0.35)',borderRadius:3,color:'#3A2E1A',
+        fontSize:10,letterSpacing:2,fontFamily:"'Raleway',sans-serif"}}>← BACK</button>
+    </div>
+  );
+}
+
+// ── GAME ──────────────────────────────────────────────────────────────────────
+function Game({gMode,onMenu,localPlayer,socket}){
+  const[g,sG]=useState(initGame);
+  const[mode,sMode]=useState('move');
+  const[ornt,sOrnt]=useState('h');
+  const[hov,sHov]=useState(null);
+  const[busy,sBusy]=useState(false);
+  const[disconnected,setDisconnected]=useState(false);
+  const gR=useRef(g);useEffect(()=>{gR.current=g;},[g]);
+
+  const oppPlayer=localPlayer===1?2:1;
+  const humanTurn=gMode==='online'
+    ?!g.win&&!disconnected&&g.cur===localPlayer
+    :!g.win&&(gMode==='pvp'||g.cur===1);
+
+  const cp=g.cur===1?g.p1:g.p2,op=g.cur===1?g.p2:g.p1;
+  const wLeft=g.cur===1?g.w1:g.w2;
+  const vmArr=humanTurn?legalMoves(cp,op,g.H,g.V):[];
+  const vmSet=new Set(vmArr.map(m=>K(m.r,m.c)));
+
+  // Online: receive opponent actions
+  useEffect(()=>{
+    if(gMode!=='online'||!socket)return;
+    const onAction=(data)=>{
+      sG(g=>{
+        if(data.kind==='move')return applyMove(g,oppPlayer,data.pos);
+        if(data.kind==='wall')return applyWall(g,oppPlayer,data.wr,data.wc,data.o);
+        return g;
+      });
+      sMode('move');
+    };
+    const onDisc=()=>setDisconnected(true);
+    socket.on('action',onAction);
+    socket.on('opponent-disconnected',onDisc);
+    socket.on('disconnect',onDisc);
+    return()=>{socket.off('action',onAction);socket.off('opponent-disconnected',onDisc);socket.off('disconnect',onDisc);};
+  },[gMode,socket,oppPlayer]);
+
+  const doMove=useCallback((pl,pos)=>{
+    sG(g=>applyMove(g,pl,pos));
+    if(gMode==='online')socket.emit('action',{kind:'move',pos});
+    sMode('move');
+  },[gMode,socket]);
+
+  const doWall=useCallback((pl,wr,wc,o)=>{
+    sG(g=>applyWall(g,pl,wr,wc,o));
+    if(gMode==='online')socket.emit('action',{kind:'wall',wr,wc,o});
+    sHov(null);
+  },[gMode,socket]);
+
+  // Bot
+  useEffect(()=>{
+    if(gMode!=='pve'||g.cur!==2||g.win)return;
+    sBusy(true);
+    const t=setTimeout(()=>{
+      sBusy(false);
+      const{p1,p2,H,V,w2}=gR.current;
+      const a=botDecide(p2,p1,H,V,w2);
+      if(!a)return;
+      if(a.t==='move')doMove(2,a.pos);else doWall(2,a.w.wr,a.w.wc,a.w.o);
+    },750);
+    return()=>clearTimeout(t);
+  },[g.cur,g.win,gMode,doMove,doWall]);
+
+  const onCell=(r,c)=>{if(!humanTurn||mode!=='move'||!vmSet.has(K(r,c)))return;doMove(g.cur,{r,c});};
+  const onWall=(wr,wc,o)=>{
+    if(!humanTurn||mode!=='wall'||wLeft===0)return;
+    if(!wallIsLegal(wr,wc,o,g.p1,g.p2,g.H,g.V))return;
+    doWall(g.cur,wr,wc,o);
+  };
+
+  const canW=humanTurn&&mode==='wall'&&wLeft>0;
+  const wp=canW&&hov?hov:null;
+  const reset=()=>{sG(initGame());sMode('move');sOrnt('h');sHov(null);sBusy(false);setDisconnected(false);};
+
+  let p1N,p2N;
+  if(gMode==='online'){p1N=localPlayer===1?'You':'Opponent';p2N=localPlayer===2?'You':'Opponent';}
+  else{p1N='Player 1';p2N=gMode==='pve'?'Bot':'Player 2';}
+
+  const cells=Array.from({length:9},(_,r)=>Array.from({length:9},(_,c)=>{
+    const k=K(r,c),vm=mode==='move'&&humanTurn&&vmSet.has(k);
+    return<div key={k} onClick={()=>onCell(r,c)} style={{
+      position:'absolute',left:c*UNIT,top:r*UNIT,width:CS,height:CS,
+      background:vm?'rgba(68,200,85,0.17)':'rgba(255,215,135,0.035)',
+      border:vm?'1px solid rgba(68,200,85,0.48)':'1px solid rgba(255,215,135,0.065)',
+      cursor:vm?'pointer':'default',transition:'background 0.12s',zIndex:1,
+    }}/>;
+  })).flat();
+
+  const wSlots=canW?Array.from({length:8},(_,wr)=>Array.from({length:8},(_,wc)=>(
+    ornt==='h'
+      ?<div key={`hs${wr}${wc}`} onMouseEnter={()=>sHov({wr,wc,o:'h'})} onMouseLeave={()=>sHov(null)} onClick={()=>onWall(wr,wc,'h')}
+          style={{position:'absolute',left:wc*UNIT,top:wr*UNIT+CS-5,width:2*CS+WS,height:WS+10,cursor:'crosshair',zIndex:5,opacity:0}}/>
+      :<div key={`vs${wr}${wc}`} onMouseEnter={()=>sHov({wr,wc,o:'v'})} onMouseLeave={()=>sHov(null)} onClick={()=>onWall(wr,wc,'v')}
+          style={{position:'absolute',left:wc*UNIT+CS-5,top:wr*UNIT,width:WS+10,height:2*CS+WS,cursor:'crosshair',zIndex:5,opacity:0}}/>
+  ))).flat():[];
+
+  return(
+    <div style={{minHeight:'100vh',background:BG,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',fontFamily:"'Raleway',sans-serif",padding:'16px 20px',gap:0}}>
+
+      {disconnected&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.82)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:60}}>
+          <div style={{background:'linear-gradient(145deg,#16102A,#1C100A)',border:'1px solid rgba(201,160,80,0.32)',borderRadius:8,padding:'44px 60px',textAlign:'center'}}>
+            <div style={{fontFamily:"'Cinzel',serif",fontSize:28,color:'#DC4C64',marginBottom:10}}>Connection Lost</div>
+            <div style={{color:'#3E3020',letterSpacing:3,fontSize:12,marginBottom:32}}>YOUR OPPONENT DISCONNECTED</div>
+            <Sbtn onClick={onMenu} c='#C9A050'>Back to Menu</Sbtn>
+          </div>
+        </div>
+      )}
+
+      {g.win&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.82)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:50}}>
+          <div style={{background:'linear-gradient(145deg,#16102A,#1C100A)',border:'1px solid rgba(201,160,80,0.38)',borderRadius:8,padding:'46px 64px',textAlign:'center'}}>
+            <div style={{fontFamily:"'Cinzel',serif",fontSize:44,color:'#C9A050',marginBottom:10}}>{g.win===1?p1N:p2N} Wins!</div>
+            <div style={{color:'#3E3020',letterSpacing:4,fontSize:12,marginBottom:36}}>THE BOARD HAS BEEN CROSSED</div>
+            <div style={{display:'flex',gap:12,justifyContent:'center'}}>
+              {gMode!=='online'&&<Sbtn onClick={reset} c='#DC4C64'>Play Again</Sbtn>}
+              <Sbtn onClick={onMenu} c='#C9A050'>Main Menu</Sbtn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <Ibar name={p2N} walls={g.w2} active={!g.win&&g.cur===2&&!busy} color='#58A8EE'
+        goal='Goal ↓ bottom row' thinking={busy} tag={gMode==='online'?'P2':null}/>
+
+      <div style={{position:'relative',width:BSIZ,height:BSIZ,
+        background:'linear-gradient(145deg,#3A2510 0%,#4C3118 28%,#3A2510 55%,#30200C 100%)',
+        borderRadius:4,boxShadow:'0 16px 56px rgba(0,0,0,0.92),inset 0 1px rgba(255,255,255,0.045)',
+        overflow:'hidden',margin:'9px 0',flexShrink:0}}>
+        {Array.from({length:8},(_,i)=><div key={`gv${i}`} style={{position:'absolute',top:0,bottom:0,left:i*UNIT+CS,width:WS,background:'rgba(0,0,0,0.34)',pointerEvents:'none'}}/>)}
+        {Array.from({length:8},(_,i)=><div key={`gh${i}`} style={{position:'absolute',left:0,right:0,top:i*UNIT+CS,height:WS,background:'rgba(0,0,0,0.34)',pointerEvents:'none'}}/>)}
+        <div style={{position:'absolute',left:0,right:0,top:0,height:CS,background:'linear-gradient(180deg,rgba(220,76,100,0.1),transparent)',pointerEvents:'none'}}/>
+        <div style={{position:'absolute',left:0,right:0,bottom:0,height:CS,background:'linear-gradient(0deg,rgba(88,168,238,0.1),transparent)',pointerEvents:'none'}}/>
+        {cells}
+        {[...g.H].map(k=>{const[wr,wc]=k.split(',').map(Number),own=g.OW[`h_${wr}_${wc}`]||1;
+          return<div key={`hw${k}`} style={{position:'absolute',left:wc*UNIT,top:wr*UNIT+CS,width:2*CS+WS,height:WS,
+            background:own===1?'linear-gradient(90deg,#BC3655,#DC4C70)':'linear-gradient(90deg,#2C68AE,#58A8EE)',
+            borderRadius:2,boxShadow:own===1?'0 0 11px rgba(220,76,112,0.7)':'0 0 11px rgba(88,168,238,0.7)',
+            zIndex:3,pointerEvents:'none'}}/>;
+        })}
+        {[...g.V].map(k=>{const[wr,wc]=k.split(',').map(Number),own=g.OW[`v_${wr}_${wc}`]||1;
+          return<div key={`vw${k}`} style={{position:'absolute',left:wc*UNIT+CS,top:wr*UNIT,width:WS,height:2*CS+WS,
+            background:own===1?'linear-gradient(180deg,#BC3655,#DC4C70)':'linear-gradient(180deg,#2C68AE,#58A8EE)',
+            borderRadius:2,boxShadow:own===1?'0 0 11px rgba(220,76,112,0.7)':'0 0 11px rgba(88,168,238,0.7)',
+            zIndex:3,pointerEvents:'none'}}/>;
+        })}
+        {wp&&(()=>{const{wr,wc,o}=wp,ok=wallIsLegal(wr,wc,o,g.p1,g.p2,g.H,g.V);
+          const col=ok?'rgba(201,160,80,0.82)':'rgba(200,50,55,0.62)';
+          return o==='h'
+            ?<div style={{position:'absolute',left:wc*UNIT,top:wr*UNIT+CS,width:2*CS+WS,height:WS,background:col,borderRadius:2,zIndex:4,pointerEvents:'none'}}/>
+            :<div style={{position:'absolute',left:wc*UNIT+CS,top:wr*UNIT,width:WS,height:2*CS+WS,background:col,borderRadius:2,zIndex:4,pointerEvents:'none'}}/>;
+        })()}
+        {wSlots}
+        {[{pos:g.p1,pl:1,col:'#DC4C70',gl:'rgba(220,76,112,0.9)',lbl:'1'},
+          {pos:g.p2,pl:2,col:'#58A8EE',gl:'rgba(88,168,238,0.9)',lbl:gMode==='pve'?'B':'2'}
+        ].map(({pos,pl,col,gl,lbl})=>(
+          <div key={`pn${pl}`} style={{position:'absolute',left:pos.c*UNIT+(CS-36)/2,top:pos.r*UNIT+(CS-36)/2,
+            width:36,height:36,borderRadius:'50%',background:`radial-gradient(circle at 34% 34%,${col}F0,${col}70)`,
+            boxShadow:`0 0 20px ${gl},0 3px 12px rgba(0,0,0,0.75)`,border:`2px solid ${col}88`,zIndex:6,
+            transition:'left 0.22s ease,top 0.22s ease',display:'flex',alignItems:'center',justifyContent:'center',
+            fontFamily:"'Cinzel',serif",fontSize:14,fontWeight:700,color:'#fff',textShadow:'0 1px 4px rgba(0,0,0,0.95)'}}>
+            {lbl}
+          </div>
+        ))}
+      </div>
+
+      <Ibar name={p1N} walls={g.w1} active={!g.win&&g.cur===1} color='#DC4C70'
+        goal='Goal ↑ top row' thinking={false} tag={gMode==='online'?'P1':null}/>
+
+      {!g.win&&(
+        <div style={{display:'flex',gap:9,marginTop:12,alignItems:'center',flexWrap:'wrap',justifyContent:'center'}}>
+          {humanTurn&&(
+            <>
+              <Cbtn on={mode==='move'} click={()=>{sMode('move');sHov(null);}}>Move Pawn</Cbtn>
+              {wLeft>0&&<Cbtn on={mode==='wall'} click={()=>sMode('wall')}>Place Wall ({wLeft})</Cbtn>}
+              {mode==='wall'&&<><Cbtn on={ornt==='h'} click={()=>sOrnt('h')}>— Horizontal</Cbtn>
+                               <Cbtn on={ornt==='v'} click={()=>sOrnt('v')}>| Vertical</Cbtn></>}
+            </>
+          )}
+          <button onClick={onMenu} style={{padding:'7px 14px',background:'transparent',
+            border:'1px solid rgba(62,48,32,0.45)',borderRadius:3,color:'#3A2E1A',
+            fontSize:10,letterSpacing:2,fontFamily:"'Raleway',sans-serif"}}>MENU</button>
+        </div>
+      )}
+      {!g.win&&(
+        <div style={{marginTop:9,fontSize:10,letterSpacing:2,color:busy?'#4A3C28':'#261E10'}}>
+          {busy?'Bot is thinking…'
+           :gMode==='online'&&g.cur!==localPlayer?`Opponent's turn`
+           :`${g.cur===1?p1N:p2N}'s turn${mode==='wall'?' — hover a groove, click to place':''}`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── MENU ──────────────────────────────────────────────────────────────────────
+function Menu({onStart,onOnline}){
+  return(
+    <div style={{minHeight:'100vh',background:BG,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',fontFamily:"'Raleway',sans-serif",animation:'fadein 0.3s ease'}}>
+      <div style={{textAlign:'center',marginBottom:56}}>
+        <div style={{fontFamily:"'Cinzel',serif",fontSize:56,fontWeight:700,color:'#C9A050',
+          letterSpacing:10,textShadow:'0 0 70px rgba(201,160,80,0.28)',marginBottom:14}}>QUORIDOR</div>
+        <div style={{color:'#3E3020',fontSize:13,letterSpacing:6,fontWeight:300}}>步步為營</div>
+      </div>
+      <div style={{display:'flex',flexDirection:'column',gap:12}}>
+        <Mbtn label="Two Players" sub="Local multiplayer" onClick={()=>onStart('pvp')}/>
+        <Mbtn label="vs Bot" sub="Play against AI" onClick={()=>onStart('pve')}/>
+        <Mbtn label="Online" sub="Play with a friend via join code" onClick={onOnline} accent='#58A8EE'/>
+      </div>
+      <div style={{marginTop:56,color:'#1E1810',fontSize:11,letterSpacing:4}}>FIRST TO CROSS THE BOARD WINS</div>
+    </div>
+  );
+}
+
+// ── APP ───────────────────────────────────────────────────────────────────────
+function App(){
+  const[scr,setScr]=useState('menu');
+  const[gm,setGm]=useState('pvp');
+  const[sock,setSock]=useState(null);
+  const[localPlayer,setLocalPlayer]=useState(null);
+
+  const enterOnline=()=>{
+    const s=io(SERVER_URL,{reconnection:false});
+    setSock(s);
+    setScr('online');
+  };
+
+  const goMenu=()=>{
+    if(sock){sock.disconnect();setSock(null);}
+    setLocalPlayer(null);setGm('pvp');setScr('menu');
+  };
+
+  const handleStart=(playerNum)=>{
+    setLocalPlayer(playerNum);setGm('online');setScr('game');
+  };
+
+  if(scr==='menu')return<Menu onStart={m=>{setGm(m);setScr('game');}} onOnline={enterOnline}/>;
+  if(scr==='online')return<OnlineLobby socket={sock} onBack={goMenu} onStart={handleStart}/>;
+  return<Game gMode={gm} onMenu={goMenu} localPlayer={localPlayer} socket={sock}/>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
